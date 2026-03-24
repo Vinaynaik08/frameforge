@@ -336,6 +336,23 @@ textarea:focus,input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(
   </div>
 
   <div class="card">
+  <div class="card-label">Script Breakdown</div>
+
+  <div class="field">
+    <label>Enter Your Script (Film / Narrative)</label>
+    <textarea id="scriptInput" placeholder="Paste your story script here..." rows="4"></textarea>
+  </div>
+
+  <div style="display:flex;justify-content:flex-end;">
+    <button class="btn btn-primary" onclick="breakdownScript()">
+      Breakdown Script →
+    </button>
+  </div>
+
+  <div id="scriptError" class="error-msg"></div>
+</div>
+
+  <div class="card">
     <div class="card-label">Build Storyboard Shots</div>
     <div id="builderList" class="builder-list"></div>
     <button class="btn btn-ghost" style="width:100%;margin-bottom:24px;" onclick="addShotUI()">+ Add another shot</button>
@@ -414,6 +431,52 @@ textarea:focus,input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(
 </div>
 
 <script>
+
+async function breakdownScript() {
+  const script = document.getElementById('scriptInput').value.trim();
+  const errBox = document.getElementById('scriptError');
+
+  if (!script) {
+    errBox.textContent = 'Please enter a script';
+    return;
+  }
+
+  errBox.textContent = 'Processing...';
+
+  try {
+    const res = await fetch('/api/breakdown-script', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ script })
+    });
+
+    const data = await res.json();
+
+    if (!data.shots || !Array.isArray(data.shots)) {
+      throw new Error('Invalid response');
+    }
+
+    // CLEAR existing builder
+    document.getElementById('builderList').innerHTML = '';
+    shotCounter = 0;
+
+    // ADD shots dynamically
+    data.shots.forEach((shot) => {
+      addShotUI({
+        prompt: shot.prompt || '',
+        camera: shot.camera || '',
+        duration: shot.duration || state.defaultDuration,
+        dialogueText: shot.dialogue || ''
+      });
+    });
+
+    errBox.textContent = `✅ Generated ${data.shots.length} shots`;
+
+  } catch (err) {
+    console.error(err);
+    errBox.textContent = '❌ Failed to breakdown script';
+  }
+}
 // ════════════════════════════════════════════════
 // GLOBALS
 // ════════════════════════════════════════════════
