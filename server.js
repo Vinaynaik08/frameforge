@@ -95,28 +95,27 @@ app.post('/api/breakdown-script', async (req, res) => {
     const model = 'gemini-3.1-flash';
 
     const prompt = `
-You are a professional film director.
+Break this script into cinematic shots.
 
-Your task:
-Break the given script into cinematic shots.
+Return ONLY valid JSON.
+Do NOT include markdown or explanations.
 
-Rules:
-- Each shot = 1 visual moment
-- Keep it concise and visual
-- Generate ONLY JSON
-- No explanations
-
-Output format:
+Format:
 {
   "shots": [
     {
-      "prompt": "visual scene description",
+      "prompt": "visual scene",
       "camera": "camera movement",
-      "duration": 5 | 10 | 15,
-      "dialogue": "optional dialogue"
+      "duration": 5,
+      "dialogue": ""
     }
   ]
 }
+
+Rules:
+- 1 short action = 1 shot
+- Keep it visual
+- Max 6 shots
 
 Script:
 ${script}
@@ -125,27 +124,45 @@ ${script}
     const result = await ai.models.generateContent({
       model,
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      config: { temperature: 0.4 }
+      config: { temperature: 0.3 }
     });
 
-    const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+    let text = result.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    if (!text) throw new Error('No response from Gemini');
+    if (!text) throw new Error('Empty response');
 
-    // Extract JSON safely
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('Invalid JSON response');
+    // 🧠 CLEAN RESPONSE
+    text = text
+      .replace(/```json/g, '')
+      .replace(/```/g, '')
+      .trim();
 
-    const parsed = JSON.parse(jsonMatch[0]);
+    let parsed;
+
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // fallback: extract JSON
+      const match = text.match(/\{[\s\S]*\}/);
+      if (!match) throw new Error('No JSON found');
+      parsed = JSON.parse(match[0]);
+    }
+
+    if (!parsed.shots || !Array.isArray(parsed.shots)) {
+      throw new Error('Invalid format');
+    }
 
     return res.json(parsed);
 
   } catch (err) {
-    console.error('[breakdown] ❌', err.message);
-    return res.status(500).json({ error: err.message });
+    console.error('[breakdown] ❌', err);
+
+    return res.status(500).json({
+      error: 'Breakdown failed',
+      details: err.message
+    });
   }
 });
-
 // ── STEP 1: Generate Image (Gemini) ─────────────────────────────
 app.post('/api/generate-image', async (req, res) => {
   const { prompt, referenceImageBase64, referenceImageMime, aspectRatio } = req.body;
