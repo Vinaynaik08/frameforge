@@ -102,9 +102,9 @@ Convert the script into cinematic shots.
 
 STRICT RULES:
 - 1 simple idea = 1 shot
-- Short script → 1 shot
+- Short script → 1-3 shot
 - Longer script → multiple shots
-- Max 5 shots
+- duration must be ONLY 5, 10, or 15
 
 Return ONLY JSON:
 
@@ -279,13 +279,14 @@ app.post('/api/generate-shot-video', async (req, res) => {
   // If dialogue is provided, inject it as character speech for lip movement
   let speechNote = '';
   if (dialogueText && dialogueText.trim()) {
-    speechNote = `The character looks toward the camera and speaks the following line with natural lip movement and facial expression: "${dialogueText.trim()}"`;
+    speechNote = `The character looks toward the camera and speaks the following line with natural lip movement and facial expression(NO AUDIO): "${dialogueText.trim()}"`;
   }
 
   const wanPrompt = [
     `Photorealistic cinematic video. ${cameraNote}`,
     prompt.trim(),
     speechNote,
+    `No audio. No sound. Silent video output.`,
     `The character's face, clothing, hair, skin tone, and all physical features must remain IDENTICAL to the first frame throughout the entire video. No character drift. No appearance changes.`,
     `Smooth natural motion. Cinematic lighting. Professional film quality. ${ratio} aspect ratio.`,
     `AVOID: morphing, warping, identity changes, costume changes, flickering faces, distorted features.`
