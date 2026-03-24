@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kling O3 — Test</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d0d14; color: #e0deff; font-family: monospace; padding: 40px; min-height: 100vh; }
+  h1 { font-size: 18px; margin-bottom: 30px; color: #7b6cff; letter-spacing: .1em; }
+
+  .box { background: #13131f; border: 1px solid #2a2a44; border-radius: 10px; padding: 24px; margin-bottom: 20px; }
+  label { display: block; font-size: 11px; color: #6060a0; margin-bottom: 8px; letter-spacing: .08em; text-transform: uppercase; }
+
+  input[type=file] { display: none; }
+  .upload-btn {
+    display: inline-block; padding: 10px 20px; background: #1c1c2e;
+    border: 1px dashed #7b6cff; border-radius: 8px; cursor: pointer;
+    font-size: 13px; color: #9d90ff; transition: background .2s;
+  }
+  .upload-btn:hover { background: #25253a; }
+
+  #preview { display: none; max-width: 320px; max-height: 180px; border-radius: 6px; margin-top: 12px; border: 1px solid #2a2a44; object-fit: contain; }
+
+  textarea {
+    width: 100%; background: #1c1c2e; border: 1px solid #2a2a44; border-radius: 8px;
+    color: #e0deff; font-family: monospace; font-size: 13px; padding: 10px 12px;
+    outline: none; resize: vertical; min-height: 60px;
+  }
+  textarea:focus { border-color: #7b6cff; }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+  input[type=text], input[type=number] {
+    width: 100%; background: #1c1c2e; border: 1px solid #2a2a44; border-radius: 8px;
+    color: #e0deff; font-family: monospace; font-size: 13px; padding: 10px 12px; outline: none;
+  }
+  input[type=text]:focus, input[type=number]:focus { border-color: #7b6cff; }
+
+  button {
+    padding: 12px 28px; background: #7b6cff; color: #fff; border: none;
+    border-radius: 8px; font-size: 14px; font-family: monospace; cursor: pointer;
+    transition: background .2s; margin-top: 20px;
+  }
+  button:hover:not(:disabled) { background: #9d90ff; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* STATUS */
+  #status-box { display: none; }
+  .status-line {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; padding: 10px 14px;
+    background: #1c1c2e; border-radius: 8px; margin-bottom: 10px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot.blue   { background: #7b6cff; animation: pulse 1s infinite; }
+  .dot.green  { background: #3ecf8e; }
+  .dot.red    { background: #f05a5a; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  /* LOG */
+  #log {
+    background: #0a0a12; border: 1px solid #1a1a2e; border-radius: 8px;
+    padding: 12px; font-size: 11px; line-height: 1.8; max-height: 200px;
+    overflow-y: auto; white-space: pre-wrap; color: #6060a0;
+  }
+  #log .ok  { color: #3ecf8e; }
+  #log .err { color: #f05a5a; }
+  #log .inf { color: #5aabf0; }
+
+  /* VIDEO RESULT */
+  #result-box { display: none; margin-top: 20px; }
+  #result-box video { width: 100%; max-width: 560px; border-radius: 8px; display: block; }
+  #dl-btn { margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<h1>▶ KLING O3 PRO — IMAGE-TO-VIDEO TEST</h1>
+
+<!-- INPUT -->
+<div class="box">
+  <label>1. Upload Start Image</label>
+  <label class="upload-btn" for="imgInput">📁 Choose Image</label>
+  <input type="file" id="imgInput" accept="image/*">
+  <img id="preview" alt="preview">
+</div>
+
+<div class="box">
+  <label>2. Prompt</label>
+  <textarea id="prompt" rows="2" placeholder="e.g. The character walks forward slowly, rain falling, cinematic lighting.">The character walks forward slowly through a neon-lit street, rain falling, cinematic lighting.</textarea>
+
+  <div class="row">
+    <div>
+      <label style="margin-top:14px;">Camera Movement</label>
+      <input type="text" id="camera" value="Slow push in" placeholder="e.g. Slow push in">
+    </div>
+    <div>
+      <label style="margin-top:14px;">Duration (3–15s)</label>
+      <input type="number" id="duration" value="5" min="3" max="15">
+    </div>
+  </div>
+
+  <div style="margin-top:14px;">
+    <label>Dialogue (optional — enables lip-sync audio)</label>
+    <input type="text" id="dialogue" placeholder="e.g. It's time to wake up.">
+  </div>
+</div>
+
+<button id="runBtn" onclick="runTest()">🎬 Generate Video</button>
+
+<!-- STATUS -->
+<div class="box" id="status-box" style="margin-top:20px;">
+  <label>Status</label>
+  <div class="status-line" id="status-line">
+    <div class="dot blue" id="status-dot"></div>
+    <span id="status-text">Starting…</span>
+  </div>
+  <div id="log"></div>
+</div>
+
+<!-- RESULT -->
+<div id="result-box">
+  <div class="box">
+    <label>✅ Video Ready</label>
+    <video id="result-video" controls></video>
+    <a id="dl-btn"><button type="button">↓ Download MP4</button></a>
+  </div>
+</div>
+
+<script>
+let imgB64 = null;
+let imgMime = 'image/png';
+let pollTimer = null;
+
+// ── image upload preview ──────────────────────────────────────────
+document.getElementById('imgInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    imgB64  = ev.target.result.split(',')[1];
+    imgMime = file.type || 'image/png';
+    const prev = document.getElementById('preview');
+    prev.src = ev.target.result;
+    prev.style.display = 'block';
+    log('inf', `Image loaded: ${file.name} (${(file.size/1024).toFixed(1)} KB, ${file.type})`);
+  };
+  reader.readAsDataURL(file);
+});
+
+// ── run test ─────────────────────────────────────────────────────
+async function runTest() {
+  if (!imgB64) { alert('Please select an image first.'); return; }
+
+  const prompt   = document.getElementById('prompt').value.trim();
+  const camera   = document.getElementById('camera').value.trim();
+  const duration = document.getElementById('duration').value;
+  const dialogue = document.getElementById('dialogue').value.trim();
+
+  if (!prompt) { alert('Please enter a prompt.'); return; }
+
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Running…';
+  document.getElementById('result-box').style.display = 'none';
+  document.getElementById('status-box').style.display = 'block';
+  clearLog();
+  setStatus('blue', 'Submitting to server…');
+
+  log('inf', `Prompt: ${prompt}`);
+  log('inf', `Camera: ${camera || 'none'}`);
+  log('inf', `Duration: ${duration}s`);
+  log('inf', `Dialogue: ${dialogue || 'none'}`);
+  log('inf', '─────────────────────────────');
+
+  try {
+    // ── POST to local server ──────────────────────────────────────
+    log('inf', 'POST /api/generate-shot-video …');
+    const submitRes = await fetch('/api/generate-shot-video', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        imageBase64:  imgB64,
+        imageMime:    imgMime,
+        prompt,
+        camera,
+        dialogue:     !!dialogue,
+        dialogueText: dialogue,
+        duration:     parseInt(duration),
+      }),
+    });
+
+    const submitData = await submitRes.json();
+    if (!submitRes.ok) throw new Error(submitData.error || 'Submit failed');
+
+    const opId = submitData.operationName;
+    log('ok', `Submitted ✓  operationName = ${opId}`);
+    setStatus('blue', 'Queued — polling every 10s…');
+
+    // ── Poll /api/poll-video ──────────────────────────────────────
+    let elapsed = 0;
+    pollTimer = setInterval(async () => {
+      elapsed += 10;
+      try {
+        const pollRes  = await fetch(`/api/poll-video?op=${encodeURIComponent(opId)}`);
+        const pollData = await pollRes.json();
+
+        if (!pollRes.ok) {
+          clearInterval(pollTimer);
+          throw new Error(pollData.error || 'Poll error');
+        }
+
+        const s = pollData.status || (pollData.done ? 'COMPLETED' : 'IN_QUEUE');
+        log('inf', `[${elapsed}s]  status = ${s}`);
+        setStatus('blue', `${s} — ${elapsed}s elapsed`);
+
+        if (pollData.done && pollData.videoBase64) {
+          clearInterval(pollTimer);
+          setStatus('green', `Done in ${elapsed}s ✅`);
+          log('ok', `Video received (${(pollData.videoBase64.length * 0.75 / 1024).toFixed(0)} KB base64)`);
+          showVideo(pollData.videoBase64);
+          btn.disabled = false;
+          btn.textContent = '🎬 Generate Video';
+        }
+
+        if (pollData.error) {
+          clearInterval(pollTimer);
+          throw new Error(pollData.error);
+        }
+
+      } catch (err) {
+        clearInterval(pollTimer);
+        setStatus('red', `Error: ${err.message}`);
+        log('err', `Poll error: ${err.message}`);
+        btn.disabled = false;
+        btn.textContent = '🎬 Generate Video';
+      }
+    }, 10000);
+
+  } catch (err) {
+    setStatus('red', `Failed: ${err.message}`);
+    log('err', err.message);
+    btn.disabled = false;
+    btn.textContent = '🎬 Generate Video';
+  }
+}
+
+// ── show video result ─────────────────────────────────────────────
+function showVideo(b64) {
+  const src = `data:video/mp4;base64,${b64}`;
+  const vid  = document.getElementById('result-video');
+  const dl   = document.getElementById('dl-btn');
+  vid.src = src;
+  dl.href = src;
+  dl.download = `kling-test-${Date.now()}.mp4`;
+  document.getElementById('result-box').style.display = 'block';
+  vid.scrollIntoView({ behavior: 'smooth' });
+}
+
+// ── UI helpers ────────────────────────────────────────────────────
+function setStatus(color, text) {
+  document.getElementById('status-dot').className = `dot ${color}`;
+  document.getElementById('status-text').textContent = text;
+}
+
+function log(type, msg) {
+  const box  = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = type;
+  const now  = new Date().toTimeString().slice(0,8);
+  line.textContent = `[${now}]  ${msg}`;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log').innerHTML = '';
+}
+</script>
+</body>
+</html>

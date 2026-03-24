@@ -1,0 +1,1104 @@
+require('dotenv').config();
+const express = require('express');
+const fetch   = require('node-fetch');
+const path    = require('path');
+
+const app = express();
+
+// ── CORS must be FIRST ────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+app.use(express.json({ limit: '50mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+const GOOGLE_KEY  = process.env.GOOGLE_AI_API_KEY;
+const FREEPIK_KEY = process.env.FREEPIK_API_KEY;
+const PORT        = process.env.PORT || 3000;
+
+if (!GOOGLE_KEY)  { console.error('\n❌  Missing GOOGLE_AI_API_KEY in .env\n');  process.exit(1); }
+if (!FREEPIK_KEY) { console.error('\n❌  Missing FREEPIK_API_KEY in .env\n');    process.exit(1); }
+
+// ── HELPER: extract JSON robustly ─────────────────────────────────────────────
+function extractJSON(text) {
+  if (!text || !text.trim()) throw new Error('Empty response from Gemini');
+  try { return JSON.parse(text.trim()); } catch (_) {}
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) { try { return JSON.parse(fenced[1].trim()); } catch (_) {} }
+  const start = text.indexOf('{');
+  const end   = text.lastIndexOf('}');
+  if (start !== -1 && end !== -1 && end > start) {
+    try { return JSON.parse(text.slice(start, end + 1)); } catch (_) {}
+  }
+  throw new Error(`Could not parse JSON from response: "${text.slice(0, 200)}"`);
+}
+
+// ── HEALTH ────────────────────────────────────────────────────────────────────
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, google: !!GOOGLE_KEY, freepik: !!FREEPIK_KEY });
+});
+
+// ── STAGE 1: PARSE SCRIPT (Gemini) ───────────────────────────────────────────
+app.post('/api/parse', async (req, res) => {
+  const { prompt, numShots } = req.body;
+  if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+
+  const n = parseInt(numShots) || 4;
+
+  console.log(`\n[parse] ── New request ──`);
+  console.log(`[parse] Prompt: "${prompt.slice(0, 100)}"`);
+  console.log(`[parse] Shots:  ${n}`);
+
+  const systemInstruction = `You are a video production AI. Given a user's video idea, expand it into a structured shot list.
+You MUST respond with ONLY a valid JSON object. No prose before it, no explanation after it, no markdown code fences.
+
+Return exactly this JSON structure:
+{
+  "title": "short project title",
+  "style": "cinematic visual style description",
+  "character": "detailed character/subject description for consistency across all shots",
+  "shots": [
+    {
+      "index": 1,
+      "title": "short shot title",
+      "description": "detailed visual description of this shot",
+      "camera": "camera angle and movement",
+      "duration": 5,
+      "dialogue": false,
+      "imagePrompt": "detailed image generation prompt including subject appearance, setting, lighting, mood, color palette, photographic style"
+    }
+  ]
+}
+
+Generate exactly ${n} shots. Each imagePrompt must be self-contained, cinematic, and vivid.`;
+
+  try {
+    console.log(`[parse] Calling Gemini API...`);
+
+    const geminiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GOOGLE_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 2500,
+            responseMimeType: 'application/json'
+          }
+        })
+      }
+    );
+
+    console.log(`[parse] Gemini HTTP status: ${geminiRes.status}`);
+
+    if (!geminiRes.ok) {
+      const errText = await geminiRes.text();
+      console.error(`[parse] Gemini error: ${errText.slice(0, 400)}`);
+      return res.status(geminiRes.status).json({
+        error: `Gemini API returned ${geminiRes.status}: ${errText.slice(0, 300)}`
+      });
+    }
+
+    const geminiData = await geminiRes.json();
+
+    if (geminiData.error) {
+      console.error(`[parse] Gemini API-level error:`, geminiData.error);
+      return res.status(500).json({ error: geminiData.error.message });
+    }
+
+    const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!rawText) {
+      console.error(`[parse] No text in response:`, JSON.stringify(geminiData).slice(0, 300));
+      return res.status(500).json({ error: 'No text content in Gemini response' });
+    }
+
+    console.log(`[parse] Raw response (first 300):\n${rawText.slice(0, 300)}`);
+
+    const parsed = extractJSON(rawText);
+
+    if (!Array.isArray(parsed.shots)) {
+      return res.status(500).json({ error: 'Response missing shots array — try again' });
+    }
+
+    console.log(`[parse] ✅ Success — ${parsed.shots.length} shots parsed`);
+    return res.json(parsed);
+
+  } catch (err) {
+    console.error(`[parse] ❌ ${err.message}`);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── STAGE 2: GENERATE IMAGE (Freepik Mystic) ──────────────────────────────────
+app.post('/api/generate-image', async (req, res) => {
+  const { prompt } = req.body;
+  if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+
+  console.log(`\n[image] Generating via Freepik Mystic: "${prompt.slice(0, 80)}..."`);
+
+  try {
+    // Step 1 — Submit task
+    const createRes = await fetch('https://api.freepik.com/v1/ai/mystic', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-freepik-api-key': FREEPIK_KEY
+      },
+      body: JSON.stringify({
+        prompt:       prompt,
+        aspect_ratio: 'widescreen_16_9',
+        model:        'realism',
+        resolution:   '2k',
+        engine:       'automatic',
+        filter_nsfw:  true
+      })
+    });
+
+    console.log(`[image] Freepik create status: ${createRes.status}`);
+
+    const createText = await createRes.text();
+    if (!createRes.ok) {
+      console.error(`[image] Freepik create error: ${createText.slice(0, 400)}`);
+      return res.status(createRes.status).json({
+        error: `Freepik API returned ${createRes.status}: ${createText.slice(0, 300)}`
+      });
+    }
+
+    const createData = JSON.parse(createText);
+    const taskId = createData.data?.task_id;
+
+    if (!taskId) {
+      console.error(`[image] No task_id in response:`, createText.slice(0, 300));
+      return res.status(500).json({ error: 'No task_id returned from Freepik' });
+    }
+
+    console.log(`[image] Task created: ${taskId} — polling...`);
+
+    // Step 2 — Poll until COMPLETED (max 20 attempts × 3s = 60s)
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await new Promise(r => setTimeout(r, 3000));
+
+      const pollRes  = await fetch(`https://api.freepik.com/v1/ai/mystic/${taskId}`, {
+        headers: { 'x-freepik-api-key': FREEPIK_KEY }
+      });
+      const pollData = await pollRes.json();
+      const status   = pollData.data?.status;
+
+      console.log(`[image] Poll ${attempt + 1}: ${status}`);
+
+      if (status === 'COMPLETED') {
+        const imageUrl = pollData.data?.generated?.[0];
+        if (!imageUrl) {
+          return res.status(500).json({ error: 'Task completed but no image URL returned' });
+        }
+        const imgBuffer = await (await fetch(imageUrl)).buffer();
+        const b64       = imgBuffer.toString('base64');
+        console.log(`[image] ✅ Image ready`);
+        return res.json({ imageBase64: b64, mimeType: 'image/jpeg' });
+      }
+
+      if (status === 'FAILED') {
+        return res.status(500).json({ error: 'Freepik image task failed' });
+      }
+    }
+
+    return res.status(500).json({ error: 'Freepik image task timed out after 60s' });
+
+  } catch (err) {
+    console.error(`[image] ❌ ${err.message}`);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── STAGE 3: GENERATE SINGLE FULL VIDEO (Freepik Kling v2) ───────────────────
+// Receives ALL approved shots, builds one combined narrative prompt,
+// uses the first approved frame as reference, returns one single video
+app.post('/api/generate-video', async (req, res) => {
+  const { shots } = req.body;
+  // shots = [{ imageBase64, prompt, title, index }, ...] ordered by shot index
+
+  if (!shots || !Array.isArray(shots) || shots.length === 0) {
+    return res.status(400).json({ error: 'shots array is required' });
+  }
+
+  console.log(`\n[video] Generating single full video from ${shots.length} shots...`);
+
+  // Build one combined narrative prompt from all shots in sequence
+  const combinedPrompt = shots
+    .map((s, i) => `Shot ${i + 1} — ${s.title}: ${s.prompt}`)
+    .join('. ');
+
+  console.log(`[video] Combined prompt (first 300): "${combinedPrompt.slice(0, 300)}"`);
+
+  // First approved frame anchors the character and visual style
+  const firstImageBase64 = shots[0].imageBase64;
+
+  try {
+    const createRes = await fetch('https://api.freepik.com/v1/ai/image-to-video/kling-v2', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-freepik-api-key': FREEPIK_KEY
+      },
+      body: JSON.stringify({
+        image:           `data:image/jpeg;base64,${firstImageBase64}`,
+        prompt:          combinedPrompt,
+        negative_prompt: 'blurry, low quality, distortion, watermark, jump cuts, abrupt transitions, flickering',
+        duration:        '10',
+        cfg_scale:       0.5
+      })
+    });
+
+    console.log(`[video] Freepik create status: ${createRes.status}`);
+
+    const createText = await createRes.text();
+    if (!createRes.ok) {
+      console.error(`[video] Freepik error: ${createText.slice(0, 400)}`);
+      return res.status(createRes.status).json({
+        error: `Freepik video API returned ${createRes.status}: ${createText.slice(0, 300)}`
+      });
+    }
+
+    const createData = JSON.parse(createText);
+    const taskId     = createData.data?.task_id;
+
+    if (!taskId) {
+      console.error(`[video] No task_id:`, createText.slice(0, 300));
+      return res.status(500).json({ error: 'No task_id returned from Freepik video API' });
+    }
+
+    console.log(`[video] ✅ Task created: ${taskId}`);
+    return res.json({ taskId });
+
+  } catch (err) {
+    console.error(`[video] ❌ ${err.message}`);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── STAGE 3: POLL VIDEO STATUS ────────────────────────────────────────────────
+app.get('/api/poll-video', async (req, res) => {
+  const taskId = req.query.op;
+  if (!taskId) return res.status(400).json({ error: 'op query param required' });
+
+  console.log(`[poll] Checking task: ${taskId}`);
+
+  try {
+    const pollRes = await fetch(
+      `https://api.freepik.com/v1/ai/image-to-video/kling-v2/${taskId}`,
+      { headers: { 'x-freepik-api-key': FREEPIK_KEY } }
+    );
+
+    if (!pollRes.ok) {
+      const errText = await pollRes.text();
+      console.error(`[poll] Freepik error: ${errText.slice(0, 300)}`);
+      return res.status(pollRes.status).json({
+        error: `Poll returned ${pollRes.status}: ${errText.slice(0, 300)}`
+      });
+    }
+
+    const pollData = await pollRes.json();
+    const status   = pollData.data?.status;
+
+    console.log(`[poll] Status: ${status}`);
+
+    if (status === 'COMPLETED') {
+      const videoUrl = pollData.data?.generated?.[0];
+      if (!videoUrl) {
+        return res.status(500).json({ error: 'Completed but no video URL found' });
+      }
+      // Fetch video and return as base64 so frontend can play + download it
+      const videoBuffer = await (await fetch(videoUrl)).buffer();
+      const b64Video    = videoBuffer.toString('base64');
+      console.log(`[poll] ✅ Video ready`);
+      return res.json({ done: true, videoBase64: b64Video });
+    }
+
+    if (status === 'FAILED') {
+      return res.status(500).json({ error: 'Freepik video task failed' });
+    }
+
+    // CREATED or IN_PROGRESS — keep polling
+    return res.json({ done: false, status });
+
+  } catch (err) {
+    console.error(`[poll] ❌ ${err.message}`);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── START ─────────────────────────────────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`\n🎬  Frameforge running at http://localhost:${PORT}`);
+  console.log(`   Google key  : ${GOOGLE_KEY.slice(0, 14)}...`);
+  console.log(`   Freepik key : ${FREEPIK_KEY.slice(0, 14)}...`);
+  console.log(`\n   Health check : http://localhost:${PORT}/api/health\n`);
+});
+
+
+
+# index.htmml
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Frameforge — AI Video Pipeline</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0a0b;
+  --surface: #111113;
+  --surface2: #18181c;
+  --border: rgba(255,255,255,0.07);
+  --border2: rgba(255,255,255,0.13);
+  --text: #f0ede8;
+  --muted: #7a7873;
+  --accent: #e8c547;
+  --success: #4caf82;
+  --warn: #e07b3a;
+  --danger: #e05050;
+  --radius: 10px;
+  --radius-lg: 16px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Instrument Sans', sans-serif;
+  min-height: 100vh;
+  line-height: 1.6;
+}
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+  opacity: 0.025;
+  pointer-events: none;
+  z-index: 0;
+}
+.app { position: relative; z-index: 1; max-width: 980px; margin: 0 auto; padding: 0 24px 80px; }
+
+header {
+  padding: 36px 0 28px;
+  display: flex; align-items: flex-end; justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 36px;
+}
+.logo { display: flex; align-items: center; gap: 10px; }
+.logo-mark {
+  width: 34px; height: 34px;
+  background: var(--accent); border-radius: 9px;
+  display: flex; align-items: center; justify-content: center;
+}
+.logo-mark svg { width: 18px; height: 18px; }
+.logo-text { font-family: 'DM Serif Display', serif; font-size: 22px; letter-spacing: -0.3px; }
+.logo-sub { font-size: 10px; color: var(--muted); font-family: 'DM Mono', monospace; letter-spacing: 0.06em; margin-top: 1px; }
+
+.steps { display: flex; align-items: center; font-family: 'DM Mono', monospace; font-size: 11px; }
+.step { display: flex; align-items: center; gap: 6px; color: var(--muted); transition: color 0.3s; }
+.step.active { color: var(--accent); }
+.step.done { color: var(--success); }
+.step-num {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 1px solid currentColor;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; flex-shrink: 0; transition: all 0.3s;
+}
+.step.done .step-num { background: var(--success); border-color: var(--success); color: #000; }
+.step.active .step-num { background: var(--accent); border-color: var(--accent); color: #000; }
+.step-line { width: 24px; height: 1px; background: var(--border2); margin: 0 6px; }
+
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 28px;
+  margin-bottom: 18px;
+  animation: fadeUp 0.35s ease both;
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.card-label {
+  font-family: 'DM Mono', monospace; font-size: 10px;
+  letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase;
+  margin-bottom: 20px; display: flex; align-items: center; gap: 10px;
+}
+.card-label::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+.field { margin-bottom: 18px; }
+label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 6px; font-family: 'DM Mono', monospace; letter-spacing: 0.04em; }
+textarea, input[type=text], input[type=number] {
+  width: 100%; background: var(--surface2);
+  border: 1px solid var(--border2); border-radius: var(--radius);
+  color: var(--text); font-family: 'Instrument Sans', sans-serif;
+  font-size: 14px; padding: 10px 14px; outline: none;
+  transition: border-color 0.2s;
+}
+textarea { resize: vertical; min-height: 100px; line-height: 1.6; }
+textarea:focus, input:focus { border-color: var(--accent); }
+.hint { font-size: 11px; color: var(--muted); margin-top: 5px; font-family: 'DM Mono', monospace; }
+
+.upload-zone {
+  border: 1px dashed var(--border2); border-radius: var(--radius);
+  padding: 28px 20px; text-align: center; cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  position: relative;
+}
+.upload-zone:hover { border-color: var(--accent); background: rgba(232,197,71,0.03); }
+.upload-zone input[type=file] {
+  position: absolute; inset: 0; opacity: 0; cursor: pointer;
+  width: 100%; height: 100%;
+}
+.upload-icon { color: var(--muted); margin-bottom: 8px; }
+.upload-text { font-size: 13px; color: var(--muted); }
+.upload-text em { color: var(--accent); font-style: normal; }
+#imgPreview { max-height: 150px; border-radius: 8px; margin-top: 14px; object-fit: cover; display: none; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 9px 18px; border-radius: var(--radius);
+  font-family: 'Instrument Sans', sans-serif; font-size: 13px;
+  font-weight: 500; cursor: pointer; border: none;
+  transition: all 0.18s; letter-spacing: 0.01em; text-decoration: none;
+}
+.btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; }
+.btn-primary { background: var(--accent); color: #000; }
+.btn-primary:not(:disabled):hover { background: #f0d050; transform: translateY(-1px); }
+.btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border2); }
+.btn-ghost:not(:disabled):hover { color: var(--text); background: var(--surface2); }
+.btn-success { background: rgba(76,175,130,0.13); color: var(--success); border: 1px solid rgba(76,175,130,0.3); }
+.btn-success:not(:disabled):hover { background: rgba(76,175,130,0.22); }
+.btn-warn { background: rgba(224,123,58,0.12); color: var(--warn); border: 1px solid rgba(224,123,58,0.28); }
+.btn-warn:not(:disabled):hover { background: rgba(224,123,58,0.22); }
+
+.json-block {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px 18px;
+  font-family: 'DM Mono', monospace; font-size: 12px;
+  color: var(--muted); line-height: 1.75;
+  max-height: 280px; overflow-y: auto;
+  white-space: pre;
+}
+.jk { color: #7ab8e8; }
+.js { color: #e8c08a; }
+.jv { color: #b8d96e; }
+.jn { color: #c8a0f0; }
+
+.status-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 14px; background: var(--surface2);
+  border-radius: var(--radius); font-size: 13px; margin-bottom: 14px;
+}
+.spin {
+  width: 14px; height: 14px; flex-shrink: 0;
+  border: 2px solid rgba(232,197,71,0.25);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+.summary-bar {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 16px 22px;
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 18px;
+}
+.counts { display: flex; gap: 24px; }
+.count { text-align: center; }
+.count-n { font-family: 'DM Serif Display', serif; font-size: 24px; line-height: 1; }
+.count-l { font-size: 10px; color: var(--muted); font-family: 'DM Mono', monospace; margin-top: 2px; }
+.c-success .count-n { color: var(--success); }
+.c-warn .count-n { color: var(--warn); }
+.c-muted .count-n { color: var(--muted); }
+
+.sb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 14px;
+}
+.shot-card {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden;
+  transition: border-color 0.25s;
+}
+.shot-card.approved { border-color: rgba(76,175,130,0.6); }
+.shot-frame {
+  width: 100%; aspect-ratio: 16/9;
+  background: #0d0d0f;
+  position: relative; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.shot-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.frame-overlay {
+  display: flex; flex-direction: column; align-items: center; gap: 7px;
+  color: var(--muted);
+}
+.frame-overlay span { font-size: 11px; }
+.shot-num-badge {
+  position: absolute; top: 7px; left: 7px;
+  background: rgba(0,0,0,0.55); color: var(--text);
+  font-family: 'DM Mono', monospace; font-size: 10px;
+  padding: 2px 7px; border-radius: 4px;
+}
+.shot-status {
+  position: absolute; top: 7px; right: 7px;
+  font-family: 'DM Mono', monospace; font-size: 10px;
+  padding: 2px 8px; border-radius: 4px;
+}
+.st-generating { background: rgba(232,197,71,0.15); color: var(--accent); }
+.st-pending    { background: rgba(255,255,255,0.07); color: var(--muted); }
+.st-approved   { background: rgba(76,175,130,0.18); color: var(--success); }
+.st-error      { background: rgba(224,80,80,0.15); color: var(--danger); }
+
+.shot-info { padding: 10px 12px 12px; }
+.shot-title { font-size: 12px; font-weight: 500; margin-bottom: 2px; }
+.shot-meta  { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
+.shot-btns  { display: flex; gap: 6px; flex-wrap: wrap; }
+.shot-btns .btn { padding: 4px 10px; font-size: 11px; }
+
+.fb-panel { margin-top: 10px; display: none; }
+.fb-panel.open { display: block; }
+.fb-panel textarea { min-height: 52px; font-size: 12px; padding: 7px 10px; margin-bottom: 7px; }
+
+.prog-wrap { background: var(--surface2); border-radius: 100px; height: 4px; margin: 12px 0; overflow: hidden; }
+.prog-fill  { height: 100%; background: var(--accent); border-radius: 100px; transition: width 0.6s ease; }
+
+/* storyboard preview strip shown on video page */
+.strip {
+  display: flex; gap: 8px; overflow-x: auto;
+  padding: 12px 0; margin-bottom: 20px;
+  scrollbar-width: thin;
+}
+.strip-thumb {
+  flex-shrink: 0; width: 120px; height: 68px;
+  border-radius: 6px; overflow: hidden;
+  border: 1px solid var(--border);
+  position: relative;
+}
+.strip-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.strip-thumb-label {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  background: rgba(0,0,0,0.6);
+  font-family: 'DM Mono', monospace; font-size: 9px;
+  color: var(--muted); padding: 2px 5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.section { display: none; }
+.section.visible { display: block; animation: fadeUp 0.3s ease both; }
+
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.error-msg {
+  color: var(--danger); font-size: 12px; font-family: 'DM Mono', monospace;
+  padding: 10px 14px; background: rgba(224,80,80,0.08);
+  border-radius: var(--radius); border: 1px solid rgba(224,80,80,0.2);
+  margin-bottom: 12px;
+}
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+<header>
+  <div class="logo">
+    <div class="logo-mark">
+      <svg viewBox="0 0 18 18" fill="none"><rect x="2" y="2" width="14" height="10" rx="2" stroke="#000" stroke-width="1.5"/><path d="M6 16l3-4 3 4" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div>
+      <div class="logo-text">Frameforge</div>
+      <div class="logo-sub">AI Video Pipeline</div>
+    </div>
+  </div>
+  <div class="steps">
+    <div class="step active" id="si1"><div class="step-num">1</div>&nbsp;Idea</div>
+    <div class="step-line"></div>
+    <div class="step" id="si2"><div class="step-num">2</div>&nbsp;Structure</div>
+    <div class="step-line"></div>
+    <div class="step" id="si3"><div class="step-num">3</div>&nbsp;Storyboard</div>
+    <div class="step-line"></div>
+    <div class="step" id="si4"><div class="step-num">4</div>&nbsp;Video</div>
+  </div>
+</header>
+
+<!-- ── STEP 1: IDEA ── -->
+<div class="section visible" id="s1">
+  <div class="card">
+    <div class="card-label">Your video idea</div>
+    <div class="field">
+      <label>Describe what you want</label>
+      <textarea id="promptInput" rows="5" placeholder="e.g. A 25-second luxury watch ad. A well-dressed man walks through a rainy city street at night, checks his watch under a streetlamp, smiles. Cut to extreme close-up of the watch face. Final wide shot — logo fades in on black."></textarea>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Reference image (character / style)</label>
+        <div class="upload-zone">
+          <input type="file" id="refFile" accept="image/*" onchange="handleUpload(event)">
+          <div class="upload-icon">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><rect x="2" y="7" width="28" height="18" rx="3" stroke="currentColor" stroke-width="1.5"/><circle cx="11" cy="15" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M2 22l7-7 4 4 5-6 12 9" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="upload-text">Drop image or <em>browse</em></div>
+          <img id="imgPreview" alt="Reference">
+        </div>
+        <div class="hint">Optional — strongly recommended for character consistency</div>
+      </div>
+      <div class="field">
+        <label>Number of shots</label>
+        <input type="number" id="numShots" value="4" min="2" max="8" style="width:80px">
+        <div class="hint" style="margin-top:10px">Recommended: 3–6 for a 20–30 sec video</div>
+        <div style="margin-top:24px">
+          <button class="btn btn-primary" id="btnParse" onclick="parseScript()">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M7 2l5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Parse with AI →
+          </button>
+        </div>
+      </div>
+    </div>
+    <div id="parseError"></div>
+  </div>
+</div>
+
+<!-- ── STEP 2: STRUCTURE ── -->
+<div class="section" id="s2">
+  <div class="card">
+    <div class="card-label">AI shot structure</div>
+    <div id="parseStatus"></div>
+    <div class="json-block" id="jsonOut"></div>
+    <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn btn-primary" id="btnGenSB" onclick="goToStoryboard()" style="display:none">
+        Generate storyboard frames →
+      </button>
+      <button class="btn btn-ghost" onclick="goToStep(1)">← Edit idea</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── STEP 3: STORYBOARD ── -->
+<div class="section" id="s3">
+  <div class="summary-bar">
+    <div class="counts">
+      <div class="count c-success"><div class="count-n" id="cApproved">0</div><div class="count-l">Approved</div></div>
+      <div class="count c-warn"><div class="count-n" id="cPending">0</div><div class="count-l">Pending</div></div>
+      <div class="count c-muted"><div class="count-n" id="cTotal">0</div><div class="count-l">Total shots</div></div>
+    </div>
+    <button class="btn btn-primary" id="btnGenVid" onclick="startVideoGeneration()" disabled>
+      Generate video →
+    </button>
+  </div>
+  <div class="sb-grid" id="sbGrid"></div>
+</div>
+
+<!-- ── STEP 4: VIDEO ── -->
+<div class="section" id="s4">
+  <div class="card">
+    <div class="card-label">Full video generation</div>
+
+    <!-- Storyboard strip shown as reference -->
+    <div id="storyStrip" class="strip"></div>
+
+    <div id="vidStatus"></div>
+    <div class="prog-wrap" id="vidProgWrap" style="display:none">
+      <div class="prog-fill" id="vidProg" style="width:0%"></div>
+    </div>
+    <div id="vidResults"></div>
+  </div>
+</div>
+
+</div><!-- /app -->
+
+<script>
+const state = {
+  prompt: '',
+  refImageB64: '',
+  refImageMime: 'image/jpeg',
+  shots: [],
+  meta: {},
+  frames: {},
+};
+
+// ── UPLOAD ────────────────────────────────────────────────────────────────────
+function handleUpload(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const data = ev.target.result;
+    state.refImageB64  = data.split(',')[1];
+    state.refImageMime = file.type || 'image/jpeg';
+    const img = document.getElementById('imgPreview');
+    img.src = data;
+    img.style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+}
+
+// ── STEP 1 → 2: PARSE ────────────────────────────────────────────────────────
+async function parseScript() {
+  const prompt   = document.getElementById('promptInput').value.trim();
+  const numShots = parseInt(document.getElementById('numShots').value) || 4;
+  if (!prompt) { showError('parseError', 'Please describe your video idea.'); return; }
+
+  state.prompt = prompt;
+  document.getElementById('btnParse').disabled = true;
+  clearError('parseError');
+  goToStep(2);
+
+  document.getElementById('parseStatus').innerHTML  = statusRow('spin', 'AI is reading your idea and building shot structure…');
+  document.getElementById('jsonOut').innerHTML      = '';
+  document.getElementById('btnGenSB').style.display = 'none';
+
+  try {
+    const res  = await fetch('/api/parse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, numShots })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
+
+    state.shots = data.shots;
+    state.meta  = { title: data.title, style: data.style, character: data.character };
+
+    document.getElementById('parseStatus').innerHTML   = '';
+    document.getElementById('jsonOut').innerHTML       = highlight(JSON.stringify(data, null, 2));
+    document.getElementById('btnGenSB').style.display  = 'inline-flex';
+  } catch (err) {
+    document.getElementById('parseStatus').innerHTML = `<div class="error-msg">${esc(err.message)}</div>`;
+  }
+  document.getElementById('btnParse').disabled = false;
+}
+
+// ── STEP 2 → 3: STORYBOARD ───────────────────────────────────────────────────
+function goToStoryboard() {
+  goToStep(3);
+  buildGrid();
+  generateAllFrames();
+}
+
+function buildGrid() {
+  const grid = document.getElementById('sbGrid');
+  grid.innerHTML = '';
+  state.shots.forEach((shot, i) => {
+    state.frames[i] = { b64: null, approved: false, feedbackPrompt: '' };
+    grid.insertAdjacentHTML('beforeend', shotCardHTML(shot, i));
+  });
+  updateCounts();
+}
+
+function shotCardHTML(shot, i) {
+  return `
+<div class="shot-card" id="sc${i}">
+  <div class="shot-frame" id="sf${i}">
+    <div class="shot-num-badge">Shot ${i+1}</div>
+    <div class="shot-status st-generating" id="sb${i}">Generating…</div>
+    <div class="frame-overlay" id="fo${i}">
+      <svg width="28" height="28" viewBox="0 0 28 28" fill="none" opacity=".35"><rect x="2" y="5" width="24" height="18" rx="3" stroke="currentColor" stroke-width="1.5"/><circle cx="10" cy="13" r="2.5" stroke="currentColor" stroke-width="1.5"/><path d="M2 20l7-7 4 4 4-5 9 8" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+      <span>Generating…</span>
+    </div>
+  </div>
+  <div class="shot-info">
+    <div class="shot-title">${esc(shot.title)}</div>
+    <div class="shot-meta">${esc(shot.camera)} · ${shot.duration}s</div>
+    <div class="shot-btns" id="sbtns${i}">
+      <button class="btn btn-ghost" disabled style="opacity:.35">Approve</button>
+      <button class="btn btn-ghost" disabled style="opacity:.35">Feedback</button>
+    </div>
+    <div class="fb-panel" id="fb${i}">
+      <textarea id="fbt${i}" placeholder="Describe what to change…" rows="2"></textarea>
+      <button class="btn btn-warn" onclick="regenFrame(${i})">Regenerate with feedback</button>
+    </div>
+  </div>
+</div>`;
+}
+
+async function generateAllFrames() {
+  for (let i = 0; i < state.shots.length; i += 2) {
+    await Promise.all(
+      state.shots.slice(i, i + 2).map((_, bi) => generateFrame(i + bi))
+    );
+  }
+}
+
+async function generateFrame(i) {
+  const shot = state.shots[i];
+  let prompt = shot.imagePrompt || shot.description;
+  if (state.meta.character) prompt = `Character: ${state.meta.character}. ${prompt}`;
+  if (state.meta.style)     prompt = `${prompt}. Visual style: ${state.meta.style}.`;
+  if (state.frames[i].feedbackPrompt) prompt += ` ${state.frames[i].feedbackPrompt}`;
+
+  setBadge(i, 'generating', 'Generating…');
+
+  try {
+    const res  = await fetch('/api/generate-image', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
+
+    state.frames[i].b64 = data.imageBase64;
+    showFrame(i, `data:${data.mimeType};base64,${data.imageBase64}`);
+    setBadge(i, 'pending', 'Pending');
+    setFrameActions(i);
+  } catch (err) {
+    setBadge(i, 'error', 'Error');
+    document.getElementById(`fo${i}`).innerHTML =
+      `<span style="font-size:10px;color:var(--danger);padding:8px;text-align:center;max-width:160px">${esc(err.message)}</span>`;
+    document.getElementById(`sbtns${i}`).innerHTML =
+      `<button class="btn btn-ghost" onclick="regenFrame(${i})">Retry</button>`;
+  }
+}
+
+function showFrame(i, src) {
+  const frame = document.getElementById(`sf${i}`);
+  document.getElementById(`fo${i}`)?.remove();
+  if (!frame.querySelector('img')) {
+    const img = document.createElement('img');
+    img.src = src; img.alt = `Shot ${i+1}`;
+    frame.appendChild(img);
+  } else {
+    frame.querySelector('img').src = src;
+  }
+}
+
+function setBadge(i, cls, text) {
+  const b = document.getElementById(`sb${i}`);
+  b.className = `shot-status st-${cls}`;
+  b.textContent = text;
+}
+
+function setFrameActions(i) {
+  document.getElementById(`sbtns${i}`).innerHTML = `
+    <button class="btn btn-success" onclick="approveFrame(${i})">Approve</button>
+    <button class="btn btn-warn"    onclick="toggleFeedback(${i})">Feedback</button>
+    <button class="btn btn-ghost"   onclick="regenFrame(${i})">Regen</button>`;
+}
+
+function approveFrame(i) {
+  state.frames[i].approved = true;
+  document.getElementById(`sc${i}`).className = 'shot-card approved';
+  setBadge(i, 'approved', 'Approved');
+  document.getElementById(`fb${i}`).classList.remove('open');
+  updateCounts();
+}
+
+function toggleFeedback(i) {
+  document.getElementById(`fb${i}`).classList.toggle('open');
+}
+
+async function regenFrame(i) {
+  const fbText = document.getElementById(`fbt${i}`)?.value?.trim() || '';
+  state.frames[i].approved = false;
+  state.frames[i].feedbackPrompt = fbText ? `Adjustments: ${fbText}.` : '';
+  document.getElementById(`sc${i}`).className = 'shot-card';
+  document.getElementById(`fb${i}`).classList.remove('open');
+
+  const frame = document.getElementById(`sf${i}`);
+  frame.querySelector('img')?.remove();
+  const fo = document.createElement('div');
+  fo.className = 'frame-overlay'; fo.id = `fo${i}`;
+  fo.innerHTML = `<svg width="28" height="28" viewBox="0 0 28 28" fill="none" opacity=".35"><rect x="2" y="5" width="24" height="18" rx="3" stroke="currentColor" stroke-width="1.5"/></svg><span>Regenerating…</span>`;
+  frame.appendChild(fo);
+
+  updateCounts();
+  await generateFrame(i);
+}
+
+function updateCounts() {
+  const total    = state.shots.length;
+  const approved = Object.values(state.frames).filter(f => f.approved).length;
+  document.getElementById('cTotal').textContent    = total;
+  document.getElementById('cApproved').textContent = approved;
+  document.getElementById('cPending').textContent  = total - approved;
+
+  const btn = document.getElementById('btnGenVid');
+  btn.disabled    = approved < total;
+  btn.textContent = approved < total
+    ? `Generate video (${approved}/${total} approved)`
+    : 'Generate video →';
+}
+
+// ── STEP 3 → 4: SINGLE FULL VIDEO GENERATION ─────────────────────────────────
+async function startVideoGeneration() {
+  goToStep(4);
+
+  const statusEl  = document.getElementById('vidStatus');
+  const progWrap  = document.getElementById('vidProgWrap');
+  const progFill  = document.getElementById('vidProg');
+  const resultsEl = document.getElementById('vidResults');
+  const stripEl   = document.getElementById('storyStrip');
+
+  progWrap.style.display = 'block';
+  progFill.style.width   = '5%';
+  resultsEl.innerHTML    = '';
+
+  // Show approved storyboard thumbnails as a reference strip
+  stripEl.innerHTML = state.shots.map((shot, i) => `
+    <div class="strip-thumb">
+      <img src="data:image/jpeg;base64,${state.frames[i].b64}" alt="Shot ${i+1}">
+      <div class="strip-thumb-label">Shot ${i+1}: ${esc(shot.title)}</div>
+    </div>`).join('');
+
+  // Build shots payload — ordered by index
+  const shots = state.shots.map((shot, i) => ({
+    index:       i,
+    title:       shot.title,
+    imageBase64: state.frames[i].b64,
+    prompt:      `${shot.description}. Camera: ${shot.camera}.`
+  }));
+
+  statusEl.innerHTML = statusRow('spin',
+    `Submitting ${shots.length} approved storyboard frames to generate one full video…`);
+
+  try {
+    // Submit all shots as a single video generation request
+    const startRes  = await fetch('/api/generate-video', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shots })
+    });
+    const startData = await startRes.json();
+    if (!startRes.ok) throw new Error(startData.error || `Server error ${startRes.status}`);
+
+    const taskId = startData.taskId;
+    progFill.style.width = '15%';
+
+    statusEl.innerHTML = statusRow('spin',
+      'Video is being generated — this takes 2–4 minutes, please keep this tab open…');
+
+    // Poll until done
+    const videoBase64 = await pollUntilDone(taskId, statusEl, progFill);
+
+    // ── SUCCESS ──
+    progFill.style.width = '100%';
+    statusEl.innerHTML   = statusRow('success', 'Your video is ready!');
+
+    resultsEl.innerHTML = `
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:16px">
+        <video
+          src="data:video/mp4;base64,${videoBase64}"
+          controls playsinline
+          style="width:100%;display:block;background:#000;max-height:500px">
+        </video>
+        <div style="padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+          <div>
+            <p style="font-size:13px;font-weight:500;color:var(--text);margin:0">${esc(state.meta.title || 'Frameforge Video')}</p>
+            <p style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace;margin:3px 0 0">
+              ${shots.length} shots · 10 seconds · generated by Kling v2
+            </p>
+          </div>
+          <a href="data:video/mp4;base64,${videoBase64}"
+             download="frameforge-${slugify(state.meta.title || 'video')}.mp4"
+             class="btn btn-primary"
+             style="padding:10px 24px;font-size:13px;flex-shrink:0">
+            ↓ Download video
+          </a>
+        </div>
+      </div>
+      <button class="btn btn-ghost" onclick="newProject()">Start new project</button>`;
+
+  } catch (err) {
+    progFill.style.width = '0%';
+    statusEl.innerHTML = `<div class="error-msg">${esc(err.message)}</div>
+      <div style="margin-top:12px">
+        <button class="btn btn-ghost" onclick="startVideoGeneration()">Retry</button>
+        <button class="btn btn-ghost" style="margin-left:8px" onclick="goToStep(3)">← Back to storyboard</button>
+      </div>`;
+  }
+}
+
+async function pollUntilDone(taskId, statusEl, progFill, maxMs = 360000) {
+  const t0 = Date.now();
+  let progress = 15;
+
+  while (Date.now() - t0 < maxMs) {
+    await sleep(6000);
+
+    const res  = await fetch(`/api/poll-video?op=${encodeURIComponent(taskId)}`);
+    const data = await res.json();
+
+    if (data.error) throw new Error(data.error);
+    if (data.done)  return data.videoBase64;
+
+    // Slowly nudge progress bar to show activity (caps at 90%)
+    progress = Math.min(progress + 2, 90);
+    progFill.style.width = `${progress}%`;
+
+    const elapsed = Math.round((Date.now() - t0) / 1000);
+    const mins    = Math.floor(elapsed / 60);
+    const secs    = elapsed % 60;
+    const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+
+    statusEl.innerHTML = statusRow('spin',
+      `Generating full video… (${timeStr} elapsed · status: ${data.status || 'IN_PROGRESS'})`);
+  }
+
+  throw new Error('Video generation timed out after 6 minutes — please retry');
+}
+
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function goToStep(n) {
+  [1,2,3,4].forEach(i => {
+    document.getElementById(`s${i}`).className = 'section' + (i === n ? ' visible' : '');
+    const si = document.getElementById(`si${i}`);
+    si.className = 'step' + (i < n ? ' done' : i === n ? ' active' : '');
+  });
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function newProject() {
+  Object.assign(state, { prompt:'', refImageB64:'', shots:[], meta:{}, frames:{} });
+  document.getElementById('promptInput').value        = '';
+  document.getElementById('imgPreview').style.display = 'none';
+  document.getElementById('parseError').innerHTML     = '';
+  goToStep(1);
+}
+
+function showError(id, msg) { document.getElementById(id).innerHTML = `<div class="error-msg">${esc(msg)}</div>`; }
+function clearError(id)     { document.getElementById(id).innerHTML = ''; }
+
+function statusRow(type, msg) {
+  const icon = type === 'spin'
+    ? `<div class="spin"></div>`
+    : `<div class="dot" style="background:var(--success)"></div>`;
+  return `<div class="status-row">${icon}<span>${msg}</span></div>`;
+}
+
+function highlight(json) {
+  return json
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"([^"]+)":/g, '<span class="jk">"$1"</span>:')
+    .replace(/: "([^"]*)"/g, ': <span class="js">"$1"</span>')
+    .replace(/: (true|false|null)/g, ': <span class="jv">$1</span>')
+    .replace(/: (-?\d+\.?\d*)/g, ': <span class="jn">$1</span>');
+}
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function slugify(s) {
+  return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+}
+
+goToStep(1);
+</script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "name": "frameforge",
+  "version": "3.0.0",
+  "description": "AI Video Pipeline — Gemini + Imagen 4 + Veo 3.1",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "@fal-ai/client": "^1.9.4",
+    "@google/genai": "^1.46.0",
+    "axios": "^1.13.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "form-data": "^4.0.5",
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
