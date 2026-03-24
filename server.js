@@ -87,35 +87,37 @@ app.get('/api/costs', (_req, res) => {
 
 // STEP 0: Parse the text
 // ── SCRIPT → SHOT BREAKDOWN (Gemini) ─────────────────────────────
+// ── SCRIPT → SHOT BREAKDOWN (Gemini) ─────────────────────────────
 app.post('/api/breakdown-script', async (req, res) => {
   const { script } = req.body;
   if (!script) return res.status(400).json({ error: 'script is required' });
 
   try {
-    const model = 'gemini-3.1-flash';
+    const model = 'gemini-2.5-flash';
 
     const prompt = `
-Break this script into cinematic shots.
+You are a script writer.
 
-Return ONLY valid JSON.
-Do NOT include markdown or explanations.
+Convert the script into cinematic shots.
 
-Format:
+STRICT RULES:
+- 1 simple idea = 1 shot
+- Short script → 1 shot
+- Longer script → multiple shots
+- Max 5 shots
+
+Return ONLY JSON:
+
 {
   "shots": [
     {
-      "prompt": "visual scene",
+      "prompt": "detailed cinematic visual description",
       "camera": "camera movement",
       "duration": 5,
       "dialogue": ""
     }
   ]
 }
-
-Rules:
-- 1 short action = 1 shot
-- Keep it visual
-- Max 6 shots
 
 Script:
 ${script}
@@ -127,11 +129,20 @@ ${script}
       config: { temperature: 0.3 }
     });
 
-    let text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+    // ✅ FIXED: handle multi-part responses
+    const parts = result.candidates?.[0]?.content?.parts || [];
+
+    let text = parts
+      .map(p => p.text || '')
+      .join('')
+      .trim();
+
+    // DEBUG
+    console.log("RAW GEMINI RESPONSE:\n", text);
 
     if (!text) throw new Error('Empty response');
 
-    // 🧠 CLEAN RESPONSE
+    // CLEAN
     text = text
       .replace(/```json/g, '')
       .replace(/```/g, '')
@@ -142,14 +153,13 @@ ${script}
     try {
       parsed = JSON.parse(text);
     } catch {
-      // fallback: extract JSON
       const match = text.match(/\{[\s\S]*\}/);
       if (!match) throw new Error('No JSON found');
       parsed = JSON.parse(match[0]);
     }
 
     if (!parsed.shots || !Array.isArray(parsed.shots)) {
-      throw new Error('Invalid format');
+      throw new Error('Invalid format from AI');
     }
 
     return res.json(parsed);
