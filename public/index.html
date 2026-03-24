@@ -431,7 +431,6 @@ textarea:focus,input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(
 </div>
 
 <script>
-
 async function breakdownScript() {
   const script = document.getElementById('scriptInput').value.trim();
   const errBox = document.getElementById('scriptError');
@@ -452,15 +451,20 @@ async function breakdownScript() {
 
     const data = await res.json();
 
-    if (!data.shots || !Array.isArray(data.shots)) {
-      throw new Error('Invalid response');
+    // ✅ HANDLE BACKEND ERRORS
+    if (!res.ok) {
+      throw new Error(data.details || data.error || 'Server error');
     }
 
-    // CLEAR existing builder
+    if (!data.shots || !Array.isArray(data.shots)) {
+      throw new Error('Invalid response format');
+    }
+
+    // CLEAR OLD SHOTS
     document.getElementById('builderList').innerHTML = '';
     shotCounter = 0;
 
-    // ADD shots dynamically
+    // ADD NEW SHOTS
     data.shots.forEach((shot) => {
       addShotUI({
         prompt: shot.prompt || '',
@@ -473,8 +477,9 @@ async function breakdownScript() {
     errBox.textContent = `✅ Generated ${data.shots.length} shots`;
 
   } catch (err) {
-    console.error(err);
-    errBox.textContent = '❌ Failed to breakdown script';
+    console.error("BREAKDOWN ERROR:", err);
+
+    errBox.textContent = `❌ ${err.message}`;
   }
 }
 // ════════════════════════════════════════════════
