@@ -85,6 +85,67 @@ app.get('/api/costs', (_req, res) => {
   });
 });
 
+// STEP 0: Parse the text
+// ── SCRIPT → SHOT BREAKDOWN (Gemini) ─────────────────────────────
+app.post('/api/breakdown-script', async (req, res) => {
+  const { script } = req.body;
+  if (!script) return res.status(400).json({ error: 'script is required' });
+
+  try {
+    const model = 'gemini-3.1-flash';
+
+    const prompt = `
+You are a professional film director.
+
+Your task:
+Break the given script into cinematic shots.
+
+Rules:
+- Each shot = 1 visual moment
+- Keep it concise and visual
+- Generate ONLY JSON
+- No explanations
+
+Output format:
+{
+  "shots": [
+    {
+      "prompt": "visual scene description",
+      "camera": "camera movement",
+      "duration": 5 | 10 | 15,
+      "dialogue": "optional dialogue"
+    }
+  ]
+}
+
+Script:
+${script}
+`;
+
+    const result = await ai.models.generateContent({
+      model,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: { temperature: 0.4 }
+    });
+
+    const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!text) throw new Error('No response from Gemini');
+
+    // Extract JSON safely
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('Invalid JSON response');
+
+    const parsed = JSON.parse(jsonMatch[0]);
+
+    return res.json(parsed);
+
+  } catch (err) {
+    console.error('[breakdown] ❌', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ── STEP 1: Generate Image (Gemini) ─────────────────────────────
 app.post('/api/generate-image', async (req, res) => {
   const { prompt, referenceImageBase64, referenceImageMime, aspectRatio } = req.body;
