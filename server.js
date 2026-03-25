@@ -96,28 +96,53 @@ app.post('/api/breakdown-script', async (req, res) => {
     const model = 'gemini-2.5-flash';
 
     const prompt = `
-You are a script writer.
+You are a professional cinematic storyboard artist.
 
-Convert the script into cinematic shots.
+Convert the given script into clean, minimal cinematic shots.
 
 STRICT RULES:
-- 1 simple idea = 1 shot
-- Short script → 1-3 shot
-- Longer script → multiple shots
-- duration must be ONLY 5, 10, or 15
+- Each shot MUST show ONLY ONE clear visual action or idea
+- NEVER combine multiple actions, locations, or time moments in one shot
+- If a sentence has multiple actions → split into multiple shots
+- Each shot must feel like a single frame from a movie
 
-Return ONLY JSON:
+SHOT STRUCTURE RULES:
+- Focus on ONE subject + ONE action
+- Keep visuals simple, not crowded
+- No "and", "while", "then", or multiple events in one shot
+- Avoid describing sequences inside a single shot
 
+DURATION RULES:
+- Allowed durations: 5, 10, or 15 seconds ONLY
+- Simple/static action → 5 sec
+- Medium action → 10 sec
+- Slight motion or emotion → 15 sec
+
+CAMERA RULES:
+- Use simple cinematic movements: "static", "slow pan", "slow zoom", "tracking"
+- Avoid complex or multiple camera actions in one shot
+
+PROMPT STYLE:
+- Highly visual, cinematic, realistic
+- Include subject, environment, lighting, mood
+- Do NOT describe multiple moments in one prompt
+
+OUTPUT FORMAT (STRICT JSON ONLY):
 {
   "shots": [
     {
-      "prompt": "detailed cinematic visual description",
-      "camera": "camera movement",
+      "prompt": "single clear visual scene only",
+      "camera": "one simple camera movement",
       "duration": 5,
       "dialogue": ""
     }
   ]
 }
+
+IMPORTANT:
+- Do NOT merge actions
+- Do NOT create long or complex scenes
+- Break aggressively into multiple shots if needed
 
 Script:
 ${script}
