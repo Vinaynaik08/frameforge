@@ -319,7 +319,7 @@ async function runWanPipeline(localId, imageBase64, mime, wanPrompt, durationStr
         prompt:                  wanPrompt,
         image_url:               imageUrl,
         duration:                durationStr,        // "5", "10", or "15"
-        resolution:              '1080p',
+        resolution:              '720p',
         aspect_ratio:            ratio,              // "16:9" or "9:16"
         enable_prompt_expansion: false,              // We craft the prompt ourselves
         multi_shots:             false,              // Single continuous shot per card
